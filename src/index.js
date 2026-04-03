@@ -4,7 +4,6 @@ import { cors } from 'hono/cors'
 const app = new Hono()
 app.use('/*', cors())
 
-// 辅助函数：WAV 音频头封装（保持不变）
 function createWavHeader(dataLength, sampleRate = 24000) {
     const buffer = new ArrayBuffer(44);
     const view = new DataView(buffer);
@@ -24,48 +23,45 @@ function createWavHeader(dataLength, sampleRate = 24000) {
 
 app.post('/api/douyin', async (c) => {
   try {
-    const { url } = await c.req.json()
-    if (!url) return c.json({ error: '请输入链接' }, 400)
+    const { url: rawInput } = await c.req.json()
+    if (!rawInput) return c.json({ error: '请输入内容' }, 400)
 
-    // 优先检查 API KEY 是否配置
-    if (!c.env.GEMINI_API_KEY || !c.env.OPENROUTER_API_KEY) {
-        throw new Error("云端 API 密钥未配置，请检查 Cloudflare 环境变量设置");
-    }
+    // 修改目标 1：精准提取链接。支持您贴的那种带文字的乱码
+    const urlRegex = /(https?:\/\/v\.douyin\.com\/[A-Za-z0-9]+\/)/;
+    const match = rawInput.match(urlRegex);
+    const cleanUrl = match ? match[1] : rawInput;
 
-    let podcastScript = "";
+    let videoText = "";
 
-    // 1. 调用 Gemini 解析内容（这里增加错误捕获，防止因为链接打不开导致整个 500）
-    try {
-        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${c.env.GEMINI_API_KEY}`;
-        const geminiRes = await fetch(geminiUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                contents: [{
-                    parts: [{ text: `请提取并总结以下内容的主要科技知识点：${url}。如果这是一个链接且你无法访问，请直接根据链接中的文字描述进行创作。` }]
-                }]
-            })
-        });
-        const geminiData = await geminiRes.json();
-        
-        if (geminiData.candidates && geminiData.candidates[0].content.parts[0].text) {
-            podcastScript = geminiData.candidates[0].content.parts[0].text;
-        } else {
-            throw new Error("Gemini 未能生成有效文本");
+    // 修改目标 2：如果提取到了链接，先尝试追踪它的真实文案
+    if (cleanUrl.includes('douyin.com')) {
+        try {
+            // 尝试通过 Gemini 1.5 Pro (能力更强) 来分析，并给它更明确的指令
+            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${c.env.GEMINI_API_KEY}`;
+            const geminiRes = await fetch(geminiUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    contents: [{
+                        parts: [{ text: `请根据这个抖音视频的描述文字进行创作。如果无法访问，请根据链接前后的上下文文字进行改写。内容：${rawInput}` }]
+                    }]
+                })
+            });
+            const geminiData = await geminiRes.json();
+            videoText = geminiData.candidates[0].content.parts[0].text;
+        } catch (e) {
+            videoText = rawInput; // 兜底：解析失败就直接用原始文案
         }
-    } catch (e) {
-        // 如果 Gemini 失败，将输入直接视为文案交给下一步，防止 500
-        podcastScript = url;
+    } else {
+        videoText = rawInput;
     }
 
-    // 2. 调用 OpenRouter 生成音频和最终文稿
+    // 调用 GPT-4o-audio
     const openRouterRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${c.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://voice.niuba.xin", 
-        "X-Title": "Family Podcast" 
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
         model: "openai/gpt-4o-audio-preview", 
@@ -75,18 +71,13 @@ app.post('/api/douyin', async (c) => {
         messages: [
           {
             role: "system",
-            content: `你是一个专为儿童科普的播客。姐姐(六年级)高智商，弟弟(四年级)爱物理。请将内容改写为飞飞老师和小安的对话。
-            格式红线：严禁美元符号。角度直接写 30°。分数强制用 HTML：<span class="fraction" style="display: inline-flex; flex-direction: column; vertical-align: middle; align-items: center; font-size: 0.9em; line-height: 1;"><span class="num" style="border-bottom: 1px solid currentColor; padding: 0 2px;">分子</span><span class="den" style="padding: 0 2px;">分母</span></span>`
+            content: `你是一个播客。姐姐六年级，弟弟四年级。请改写内容为飞飞老师和小安的对话。
+            角度写30°。分数用HTML：<span class="fraction" style="display: inline-flex; flex-direction: column; vertical-align: middle; align-items: center; font-size: 0.9em; line-height: 1;"><span class="num" style="border-bottom: 1px solid currentColor; padding: 0 2px;">分子</span><span class="den" style="padding: 0 2px;">分母</span></span>`
           },
-          { role: "user", content: `根据这些信息创作：\n${podcastScript}` }
+          { role: "user", content: `文案如下：\n${videoText}` }
         ]
       })
     });
-
-    if (!openRouterRes.ok) {
-       const err = await openRouterRes.text();
-       throw new Error(`OpenRouter 响应失败: ${openRouterRes.status} - ${err}`);
-    }
 
     const reader = openRouterRes.body.getReader();
     const decoder = new TextDecoder("utf-8");
@@ -105,32 +96,31 @@ app.post('/api/douyin', async (c) => {
             if (trimmedLine.startsWith('data: ') && trimmedLine !== 'data: [DONE]') {
                 try {
                     const data = JSON.parse(trimmedLine.slice(6));
-                    const delta = data.choices[0].delta;
-                    if (delta.audio) {
-                        base64Audio += delta.audio.data || "";
-                        finalScript += delta.audio.transcript || "";
+                    if (data.choices[0].delta.audio) {
+                        base64Audio += data.choices[0].delta.audio.data || "";
+                        finalScript += data.choices[0].delta.audio.transcript || "";
                     }
-                    if (delta.content) finalScript += delta.content;
+                    if (data.choices[0].delta.content) finalScript += data.choices[0].delta.content;
                 } catch (e) {}
             }
         }
     }
 
-    let finalAudio = "";
+    // 修改目标 3：修正音频 Base64 拼接
+    let finalAudioUrl = "";
     if (base64Audio) {
         const pcmBinaryStr = atob(base64Audio);
         const wavHeaderStr = createWavHeader(pcmBinaryStr.length, 24000);
-        finalAudio = btoa(wavHeaderStr + pcmBinaryStr);
+        finalAudioUrl = `data:audio/wav;base64,${btoa(wavHeaderStr + pcmBinaryStr)}`;
     }
 
     return c.json({
         script: finalScript,
-        audioBase64: finalAudio ? `data:audio/wav;base64,${finalAudio}` : ""
+        audioBase64: finalAudioUrl
     })
 
   } catch (error) {
-    // 这里的报错会显示在 000.html 的状态栏里，方便我们排查
-    return c.json({ error: `大脑内部报错: ${error.message}` }, 500)
+    return c.json({ error: `处理出错: ${error.message}` }, 500)
   }
 })
 
