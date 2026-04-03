@@ -24,39 +24,29 @@ function createWavHeader(dataLength, sampleRate = 24000) {
 app.post('/api/douyin', async (c) => {
   try {
     const { url: rawInput } = await c.req.json()
-    if (!rawInput) return c.json({ error: '请输入内容' }, 400)
+    if (!rawInput) return c.json({ error: '内容为空' }, 400)
 
-    // 修改目标 1：精准提取链接。支持您贴的那种带文字的乱码
-    const urlRegex = /(https?:\/\/v\.douyin\.com\/[A-Za-z0-9]+\/)/;
-    const match = rawInput.match(urlRegex);
-    const cleanUrl = match ? match[1] : rawInput;
+    // 1. 强力提取：把抖音链接和标题文字抠出来，扔掉“复制打开”等废话
+    const urlMatch = rawInput.match(/https?:\/\/v\.douyin\.com\/[A-Za-z0-9]+\//);
+    const cleanUrl = urlMatch ? urlMatch[0] : "";
+    // 剔除乱码干扰，只保留有意义的文字部分
+    const cleanText = rawInput.replace(/https?:\/\/\S+/g, '').replace(/[a-zA-Z0-9\/@:.]/g, '').trim();
 
-    let videoText = "";
+    // 2. 第一步：让 Gemini 必须输出原始知识点（加固指令）
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${c.env.GEMINI_API_KEY}`;
+    const geminiRes = await fetch(geminiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            contents: [{
+                parts: [{ text: `你是一个知识提取助手。请忽略视频链接中的垃圾干扰信息，只提取视频标题中的核心科技知识点。内容如下：${rawInput}` }]
+            }]
+        })
+    });
+    const geminiData = await geminiRes.json();
+    const coreFact = geminiData.candidates[0].content.parts[0].text;
 
-    // 修改目标 2：如果提取到了链接，先尝试追踪它的真实文案
-    if (cleanUrl.includes('douyin.com')) {
-        try {
-            // 尝试通过 Gemini 1.5 Pro (能力更强) 来分析，并给它更明确的指令
-            const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${c.env.GEMINI_API_KEY}`;
-            const geminiRes = await fetch(geminiUrl, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    contents: [{
-                        parts: [{ text: `请根据这个抖音视频的描述文字进行创作。如果无法访问，请根据链接前后的上下文文字进行改写。内容：${rawInput}` }]
-                    }]
-                })
-            });
-            const geminiData = await geminiRes.json();
-            videoText = geminiData.candidates[0].content.parts[0].text;
-        } catch (e) {
-            videoText = rawInput; // 兜底：解析失败就直接用原始文案
-        }
-    } else {
-        videoText = rawInput;
-    }
-
-    // 调用 GPT-4o-audio
+    // 3. 第二步：调用 GPT-4o-audio 强制执行剧本并生成音频
     const openRouterRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -71,14 +61,22 @@ app.post('/api/douyin', async (c) => {
         messages: [
           {
             role: "system",
-            content: `你是一个播客。姐姐六年级，弟弟四年级。请改写内容为飞飞老师和小安的对话。
-            角度写30°。分数用HTML：<span class="fraction" style="display: inline-flex; flex-direction: column; vertical-align: middle; align-items: center; font-size: 0.9em; line-height: 1;"><span class="num" style="border-bottom: 1px solid currentColor; padding: 0 2px;">分子</span><span class="den" style="padding: 0 2px;">分母</span></span>`
+            content: `【绝对指令】
+你现在是两名播客主持人：飞飞老师（百科全书式的老师）和小安（爱问为什么的四年级学生）。
+请根据用户提供的知识点，即兴创作一段充满好奇心和硬核科学原理的对话。
+针对姐姐（六年级ADHD）：多用发散思维，赞美奇思妙想。
+针对弟弟（四年级）：多讲物理机械构造。
+
+格式要求：
+- 严禁美元符号，角度用30°。
+- 分数强制用HTML：<span class="fraction" style="display: inline-flex; flex-direction: column; vertical-align: middle; align-items: center; font-size: 0.9em; line-height: 1;"><span class="num" style="border-bottom: 1px solid currentColor; padding: 0 2px;">分子</span><span class="den" style="padding: 0 2px;">分母</span></span>`
           },
-          { role: "user", content: `文案如下：\n${videoText}` }
+          { role: "user", content: `今天我们要聊的主题是：\n${coreFact}` }
         ]
       })
     });
 
+    // 后续流式拼接音频逻辑保持不变
     const reader = openRouterRes.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let finalScript = "";
@@ -96,17 +94,17 @@ app.post('/api/douyin', async (c) => {
             if (trimmedLine.startsWith('data: ') && trimmedLine !== 'data: [DONE]') {
                 try {
                     const data = JSON.parse(trimmedLine.slice(6));
-                    if (data.choices[0].delta.audio) {
-                        base64Audio += data.choices[0].delta.audio.data || "";
-                        finalScript += data.choices[0].delta.audio.transcript || "";
+                    const delta = data.choices[0].delta;
+                    if (delta.audio) {
+                        base64Audio += delta.audio.data || "";
+                        if (delta.audio.transcript) finalScript += delta.audio.transcript;
                     }
-                    if (data.choices[0].delta.content) finalScript += data.choices[0].delta.content;
+                    if (delta.content) finalScript += delta.content;
                 } catch (e) {}
             }
         }
     }
 
-    // 修改目标 3：修正音频 Base64 拼接
     let finalAudioUrl = "";
     if (base64Audio) {
         const pcmBinaryStr = atob(base64Audio);
@@ -115,7 +113,7 @@ app.post('/api/douyin', async (c) => {
     }
 
     return c.json({
-        script: finalScript,
+        script: finalScript || "音频生成失败，请检查提示词或模型余额",
         audioBase64: finalAudioUrl
     })
 
