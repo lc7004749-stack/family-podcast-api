@@ -7,7 +7,7 @@ const app = new Hono()
 app.use('/*', cors())
 
 // ==========================================
-// 模块 1：处理抖音链接的专属通道（多模态单次调用流）
+// 模块 1：处理抖音链接的专属通道（多模态流式组装流）
 // ==========================================
 app.post('/api/douyin', async (c) => {
   try {
@@ -20,7 +20,7 @@ app.post('/api/douyin', async (c) => {
 
     let videoText = douyinUrl
     
-    // 修改目标 1：直接向 OpenRouter 请求同时返回“文字+声音”
+    // 发起调用请求
     const openRouterRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -30,14 +30,13 @@ app.post('/api/douyin', async (c) => {
         "X-Title": "Family Podcast" 
       },
       body: JSON.stringify({
-        // 启用支持音频的多模态模型
         model: "openai/gpt-4o-audio-preview", 
-        // 强制要求模型同时输出文本和声音
         modalities: ["text", "audio"],
         audio: {
-            voice: "nova", // nova 是一款极具活力且知性的女声，非常适合科普
+            voice: "nova", 
             format: "wav"
         },
+        stream: true, // 修改目标：强行开启 OpenRouter 要求的流式传输
         messages: [
           {
             role: "system",
@@ -65,25 +64,51 @@ app.post('/api/douyin', async (c) => {
        throw new Error(`OpenRouter 报错: ${openRouterRes.status} - ${errorDetail}`);
     }
 
-    const openRouterData = await openRouterRes.json();
-    
-    // 修改目标 2：直接从返回结果中剥离出文字和 Base64 音频，删除之前所有导致报错的 TTS 代码
-    const message = openRouterData.choices[0].message;
-    
-    let podcastScript = "未生成文字";
+    // 修改目标：新增流式数据切片组装器，替换原本导致 400 的普通 JSON 解析
+    const reader = openRouterRes.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let podcastScript = "";
     let base64Audio = "";
+    let buffer = "";
 
-    // 多模态模型会将包含 HTML 排版的文本和录音打包放在 message.audio 里
-    if (message.audio) {
-        podcastScript = message.audio.transcript || message.content || podcastScript;
-        base64Audio = `data:audio/wav;base64,${message.audio.data}`;
-    } else {
-        podcastScript = message.content || podcastScript;
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        
+        // 将流式字节解码为字符串并拼接在缓冲区
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        
+        // 保留最后一行可能未传输完整的数据段
+        buffer = lines.pop();
+
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (trimmedLine.startsWith('data: ') && trimmedLine !== 'data: [DONE]') {
+                try {
+                    const data = JSON.parse(trimmedLine.slice(6));
+                    const delta = data.choices[0].delta;
+                    
+                    // 剥离并拼装音频碎片
+                    if (delta.audio) {
+                        base64Audio += delta.audio.data || "";
+                        podcastScript += delta.audio.transcript || "";
+                    }
+                    // 剥离并拼装常规文字段落
+                    if (delta.content) {
+                        podcastScript += delta.content;
+                    }
+                } catch (e) {
+                    // 忽略切片传输过程中不完整的 JSON 块报错
+                }
+            }
+        }
     }
 
+    // 拼装完成后统一返回
     return c.json({
-        script: podcastScript,
-        audioBase64: base64Audio
+        script: podcastScript || "未生成文字",
+        audioBase64: base64Audio ? `data:audio/wav;base64,${base64Audio}` : ""
     })
 
   } catch (error) {
