@@ -6,8 +6,34 @@ const app = new Hono()
 // 全局设置：解决跨域
 app.use('/*', cors())
 
+// 辅助函数：为原始 PCM 数据生成标准的 WAV 文件头
+function createWavHeader(dataLength, sampleRate = 24000) {
+    const buffer = new ArrayBuffer(44);
+    const view = new DataView(buffer);
+    view.setUint32(0, 0x52494646, false); // "RIFF"
+    view.setUint32(4, 36 + dataLength, true);
+    view.setUint32(8, 0x57415645, false); // "WAVE"
+    view.setUint32(12, 0x666d7420, false); // "fmt "
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); // PCM
+    view.setUint16(22, 1, true); // 单声道
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); // Byte rate
+    view.setUint16(32, 2, true); // Block align
+    view.setUint16(34, 16, true); // 16-bit
+    view.setUint32(36, 0x64617461, false); // "data"
+    view.setUint32(40, dataLength, true);
+    
+    let headerStr = '';
+    const headerBytes = new Uint8Array(buffer);
+    for (let i = 0; i < headerBytes.length; i++) {
+        headerStr += String.fromCharCode(headerBytes[i]);
+    }
+    return headerStr;
+}
+
 // ==========================================
-// 模块 1：处理抖音链接的专属通道（多模态流式组装流）
+// 模块 1：处理抖音链接的专属通道
 // ==========================================
 app.post('/api/douyin', async (c) => {
   try {
@@ -20,7 +46,6 @@ app.post('/api/douyin', async (c) => {
 
     let videoText = douyinUrl
     
-    // 发起调用请求
     const openRouterRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -34,9 +59,9 @@ app.post('/api/douyin', async (c) => {
         modalities: ["text", "audio"],
         audio: {
             voice: "nova", 
-            format: "wav"
+            format: "pcm16" // 修改目标 1：顺应 OpenAI 强制要求，改为原始裸数据
         },
-        stream: true, // 修改目标：强行开启 OpenRouter 要求的流式传输
+        stream: true, 
         messages: [
           {
             role: "system",
@@ -64,7 +89,6 @@ app.post('/api/douyin', async (c) => {
        throw new Error(`OpenRouter 报错: ${openRouterRes.status} - ${errorDetail}`);
     }
 
-    // 修改目标：新增流式数据切片组装器，替换原本导致 400 的普通 JSON 解析
     const reader = openRouterRes.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let podcastScript = "";
@@ -75,11 +99,8 @@ app.post('/api/douyin', async (c) => {
         const { done, value } = await reader.read();
         if (done) break;
         
-        // 将流式字节解码为字符串并拼接在缓冲区
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        
-        // 保留最后一行可能未传输完整的数据段
         buffer = lines.pop();
 
         for (const line of lines) {
@@ -89,26 +110,29 @@ app.post('/api/douyin', async (c) => {
                     const data = JSON.parse(trimmedLine.slice(6));
                     const delta = data.choices[0].delta;
                     
-                    // 剥离并拼装音频碎片
                     if (delta.audio) {
                         base64Audio += delta.audio.data || "";
                         podcastScript += delta.audio.transcript || "";
                     }
-                    // 剥离并拼装常规文字段落
                     if (delta.content) {
                         podcastScript += delta.content;
                     }
-                } catch (e) {
-                    // 忽略切片传输过程中不完整的 JSON 块报错
-                }
+                } catch (e) {}
             }
         }
     }
 
-    // 拼装完成后统一返回
+    // 修改目标 2：将拼接好的裸 PCM16 数据装入 WAV 外壳
+    let finalBase64Audio = "";
+    if (base64Audio) {
+        const pcmBinaryStr = atob(base64Audio); // 解码 Base64 为二进制字符串
+        const wavHeaderStr = createWavHeader(pcmBinaryStr.length, 24000); // 戴上音频头
+        finalBase64Audio = btoa(wavHeaderStr + pcmBinaryStr); // 重新打包成带头的完整音频发送
+    }
+
     return c.json({
         script: podcastScript || "未生成文字",
-        audioBase64: base64Audio ? `data:audio/wav;base64,${base64Audio}` : ""
+        audioBase64: finalBase64Audio ? `data:audio/wav;base64,${finalBase64Audio}` : ""
     })
 
   } catch (error) {
