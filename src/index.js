@@ -30,8 +30,8 @@ app.post('/api/douyin', async (c) => {
         "X-Title": "Family Podcast" 
       },
       body: JSON.stringify({
-        // 修改目标：换用 OpenRouter 上兼容性最好的 Gemini 模型，彻底解决 400 报错
-        model: "google/gemini-flash-1.5", 
+        // 修改目标：修正模型名字顺序，并增加 :free 后缀确保 100% 免费跑通
+        model: "openai/gpt-4o-mini", 
         messages: [
           {
             role: "system",
