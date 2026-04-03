@@ -7,7 +7,7 @@ const app = new Hono()
 app.use('/*', cors())
 
 // ==========================================
-// 模块 1：处理抖音链接的专属通道（双发流：文本+音频）
+// 模块 1：处理抖音链接的专属通道（多模态单次调用流）
 // ==========================================
 app.post('/api/douyin', async (c) => {
   try {
@@ -20,7 +20,7 @@ app.post('/api/douyin', async (c) => {
 
     let videoText = douyinUrl
     
-    // 第 1 步：调用大模型生成带有格式的文稿
+    // 修改目标 1：直接向 OpenRouter 请求同时返回“文字+声音”
     const openRouterRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -30,7 +30,14 @@ app.post('/api/douyin', async (c) => {
         "X-Title": "Family Podcast" 
       },
       body: JSON.stringify({
-        model: "openai/gpt-4o-mini", // 使用您验证成功的模型
+        // 启用支持音频的多模态模型
+        model: "openai/gpt-4o-audio-preview", 
+        // 强制要求模型同时输出文本和声音
+        modalities: ["text", "audio"],
+        audio: {
+            voice: "nova", // nova 是一款极具活力且知性的女声，非常适合科普
+            format: "wav"
+        },
         messages: [
           {
             role: "system",
@@ -59,43 +66,24 @@ app.post('/api/douyin', async (c) => {
     }
 
     const openRouterData = await openRouterRes.json();
-    const podcastScript = openRouterData.choices[0].message.content;
+    
+    // 修改目标 2：直接从返回结果中剥离出文字和 Base64 音频，删除之前所有导致报错的 TTS 代码
+    const message = openRouterData.choices[0].message;
+    
+    let podcastScript = "未生成文字";
+    let base64Audio = "";
 
-    // 第 2 步：清洗文本给 TTS 语音引擎（正则过滤掉 span 等排版 HTML 标签，避免被读出来）
-    const pureTextForTTS = podcastScript.replace(/<[^>]+>/g, '');
-
-    // 第 3 步：调用 TTS 高级语音接口 (如果您的代理地址不同，请替换为对应的 baseURL)
-    const ttsRes = await fetch("https://api.openai.com/v1/audio/speech", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${c.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "tts-1",
-        input: pureTextForTTS,
-        voice: "nova" // nova 音色非常有活力且知性，极其适合家庭播客场景
-      })
-    });
-
-    if (!ttsRes.ok) {
-        const ttsError = await ttsRes.text();
-        throw new Error(`TTS生成报错: ${ttsRes.status} - ${ttsError}`);
+    // 多模态模型会将包含 HTML 排版的文本和录音打包放在 message.audio 里
+    if (message.audio) {
+        podcastScript = message.audio.transcript || message.content || podcastScript;
+        base64Audio = `data:audio/wav;base64,${message.audio.data}`;
+    } else {
+        podcastScript = message.content || podcastScript;
     }
 
-    // 第 4 步：将二进制音频流转换为 Base64 字符串
-    const audioArrayBuffer = await ttsRes.arrayBuffer();
-    const base64Audio = btoa(
-        new Uint8Array(audioArrayBuffer).reduce(
-            (data, byte) => data + String.fromCharCode(byte),
-            ''
-        )
-    );
-
-    // 第 5 步：以 JSON 格式同时返回文稿和音频数据
     return c.json({
         script: podcastScript,
-        audioBase64: `data:audio/mpeg;base64,${base64Audio}`
+        audioBase64: base64Audio
     })
 
   } catch (error) {
