@@ -1,0 +1,8 @@
+{
+  "name": "family-podcast-api",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "dependencies": {
+    "hono": "^4.0.0"
+  }
+}
