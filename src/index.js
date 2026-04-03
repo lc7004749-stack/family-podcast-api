@@ -3,7 +3,7 @@ import { cors } from 'hono/cors'
 
 const app = new Hono()
 
-// 全局设置：使用 Hono 官方的跨域组件彻底解决 CORS 拦截
+// 全局设置：使用官方组件解决跨域
 app.use('/*', cors())
 
 // ==========================================
@@ -18,42 +18,36 @@ app.post('/api/douyin', async (c) => {
       return c.text('请提供有效的输入内容', 400)
     }
 
-    // 已经修改为直接接收文案，方便当前测试环境
+    // 接收文案进行测试
     let videoText = douyinUrl
     
-    /* 未来真实API接入示例：
-    const parseRes = await fetch("https://api.your-parser.com/video", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: douyinUrl })
-    });
-    const parseData = await parseRes.json();
-    videoText = parseData.description || "提取失败";
-    */
-
     const openRouterRes = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${c.env.OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://voice.niuba.xin", // 修改目标：补充 OpenRouter 官方安全校验要求的来源域名
-        "X-Title": "Family Podcast" // 修改目标：补充 OpenRouter 官方要求的前端应用名称
+        "HTTP-Referer": "https://voice.niuba.xin", 
+        "X-Title": "Family Podcast" 
       },
       body: JSON.stringify({
-        model: "anthropic/claude-3.5-sonnet", 
+        // 修改目标：换用 OpenRouter 上兼容性最好的 Gemini 模型，彻底解决 400 报错
+        model: "google/gemini-flash-1.5", 
         messages: [
           {
             role: "system",
             content: `你是一个专为儿童进行硬核科技科普的AI家庭播客引擎。
 听众画像：
-1. 姐姐（六年级）：高智商、思维跳跃。请多肯定奇思妙想，将枯燥技术转化为关于人类、艺术或未来的哲学探讨。
-2. 弟弟（四年级）：冷静理性，喜欢物理、天文和手工。请多用具象化的手工材料解释机械原理。可以借用《小英雄雨来》中的机智果敢来进行类比。
+1. 姐姐（六年级）：高智商、思维跳跃。请多肯定奇思妙想，将枯燥技术转化为关于人类、艺术或未来的哲学探讨，帮她克服自我怀疑。
+2. 弟弟（四年级）：冷静理性，喜欢物理、天文和手工。请多用具体的物理逻辑解释机械原理（如力矩、重心）。
 
-格式红线（极度重要）：
-输出两位主持人（飞飞老师和小安）的对话体。
-严禁使用任何美元符号进行公式渲染。角度直接使用普通文本标号（如 30°、180°）。
-涉及分数时绝对不允许使用斜杠形式，必须强制使用以下HTML格式配合内联CSS实现标准“上下结构”，并确保垂直居中：
-<span class="fraction" style="display: inline-flex; flex-direction: column; vertical-align: middle; align-items: center; font-size: 0.9em; line-height: 1;"><span class="num" style="border-bottom: 1px solid currentColor; padding: 0 2px;">分子</span><span class="den" style="padding: 0 2px;">分母</span></span>`
+知识点参考：你可以提到李飞飞、吴恩达或马斯克的最新观点。
+格式红线（绝对禁令）：
+1. 严禁使用任何美元符号（$ 或 $$）进行 LaTeX 公式渲染。
+2. 角度直接使用普通文本标号（如 30°、180°）。
+3. 但凡涉及分数，绝对不允许使用斜杠形式（如 1/6），必须严格使用以下 HTML 配合内联 CSS 实现标准的“上下结构”，并确保与普通文本垂直居中对齐：
+<span class="fraction" style="display: inline-flex; flex-direction: column; vertical-align: middle; align-items: center; font-size: 0.9em; line-height: 1;"><span class="num" style="border-bottom: 1px solid currentColor; padding: 0 2px;">分子</span><span class="den" style="padding: 0 2px;">分母</span></span>
+
+输出格式：飞飞老师和小安的对话体。`
           },
           { role: "user", content: `请改写这段视频文案：\n${videoText}` }
         ]
@@ -61,9 +55,8 @@ app.post('/api/douyin', async (c) => {
     });
 
     if (!openRouterRes.ok) {
-       // 修改目标：拦截到错误后，解析出真实的详细报错字符串
        const errorDetail = await openRouterRes.text();
-       throw new Error(`OpenRouter API 请求失败，状态码: ${openRouterRes.status}，详细原因: ${errorDetail}`);
+       throw new Error(`OpenRouter 报错: ${openRouterRes.status} - ${errorDetail}`);
     }
 
     const openRouterData = await openRouterRes.json();
@@ -80,7 +73,7 @@ app.post('/api/douyin', async (c) => {
 // 模块 2：为未来预留的 YouTube 通道
 // ==========================================
 app.post('/api/youtube', async (c) => {
-    return c.text("YouTube 解析模块搭建中，敬请期待！")
+    return c.text("YouTube 模块搭建中...")
 })
 
 export default app
