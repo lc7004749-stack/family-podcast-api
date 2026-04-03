@@ -35,7 +35,9 @@ app.post('/api/douyin', async (c) => {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${c.env.OPENROUTER_API_KEY}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://voice.niuba.xin", // 修改目标：补充 OpenRouter 官方安全校验要求的来源域名
+        "X-Title": "Family Podcast" // 修改目标：补充 OpenRouter 官方要求的前端应用名称
       },
       body: JSON.stringify({
         model: "anthropic/claude-3.5-sonnet", 
@@ -59,7 +61,9 @@ app.post('/api/douyin', async (c) => {
     });
 
     if (!openRouterRes.ok) {
-       throw new Error(`OpenRouter API 请求失败，状态码: ${openRouterRes.status}`);
+       // 修改目标：拦截到错误后，解析出真实的详细报错字符串
+       const errorDetail = await openRouterRes.text();
+       throw new Error(`OpenRouter API 请求失败，状态码: ${openRouterRes.status}，详细原因: ${errorDetail}`);
     }
 
     const openRouterData = await openRouterRes.json();
