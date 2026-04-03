@@ -1,13 +1,10 @@
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 
 const app = new Hono()
 
-// 全局设置：允许跨域请求
-app.use('*', async (c, next) => {
-  c.res.headers.set('Access-Control-Allow-Origin', '*')
-  c.res.headers.set('Access-Control-Allow-Headers', 'Content-Type')
-  await next()
-})
+// 全局设置：使用 Hono 官方的跨域组件彻底解决 CORS 拦截
+app.use('/*', cors())
 
 // ==========================================
 // 模块 1：处理抖音链接的专属通道
@@ -18,11 +15,11 @@ app.post('/api/douyin', async (c) => {
     const douyinUrl = body.url
 
     if (!douyinUrl) {
-      return c.text('请提供有效的抖音链接', 400)
+      return c.text('请提供有效的输入内容', 400)
     }
 
-    // 新手测试兜底文案，等您有了真实的解析API后再替换下方注释部分
-    let videoText = "【测试文案】今天马斯克的星舰完成了惊人的回收，发动机喷管调整了大约 30°。推重比提升到了新的高度，这真是一项伟大的工程。"
+    // 已经修改为直接接收文案，方便当前测试环境
+    let videoText = douyinUrl
     
     /* 未来真实API接入示例：
     const parseRes = await fetch("https://api.your-parser.com/video", {
